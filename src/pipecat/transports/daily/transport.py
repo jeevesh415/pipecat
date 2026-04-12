@@ -100,58 +100,6 @@ class DailyOutputTransportMessageUrgentFrame(OutputTransportMessageUrgentFrame):
 
 
 @dataclass
-class DailyTransportMessageFrame(DailyOutputTransportMessageFrame):
-    """Frame for transport messages in Daily calls.
-
-    .. deprecated:: 0.0.87
-        This frame is deprecated and will be removed in a future version.
-        Instead, use `DailyOutputTransportMessageFrame`.
-
-    Parameters:
-        participant_id: Optional ID of the participant this message is for/from.
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "DailyTransportMessageFrame is deprecated and will be removed in a future version. "
-                "Instead, use DailyOutputTransportMessageFrame.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-
-@dataclass
-class DailyTransportMessageUrgentFrame(DailyOutputTransportMessageUrgentFrame):
-    """Frame for urgent transport messages in Daily calls.
-
-    .. deprecated:: 0.0.87
-        This frame is deprecated and will be removed in a future version.
-        Instead, use `DailyOutputTransportMessageUrgentFrame`.
-
-    Parameters:
-        participant_id: Optional ID of the participant this message is for/from.
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "DailyTransportMessageUrgentFrame is deprecated and will be removed in a future version. "
-                "Instead, use DailyOutputTransportMessageUrgentFrame.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-
-@dataclass
 class DailyInputTransportMessageFrame(InputTransportMessageFrame):
     """Frame for input urgent transport messages in Daily calls.
 
@@ -160,31 +108,6 @@ class DailyInputTransportMessageFrame(InputTransportMessageFrame):
     """
 
     participant_id: Optional[str] = None
-
-
-class DailyInputTransportMessageUrgentFrame(DailyInputTransportMessageFrame):
-    """Frame for input urgent transport messages in Daily calls.
-
-    .. deprecated:: 0.0.87
-        This frame is deprecated and will be removed in a future version.
-        Instead, use `DailyInputTransportMessageFrame`.
-
-    Parameters:
-        participant_id: Optional ID of the participant this message is for/from.
-    """
-
-    def __post_init__(self):
-        super().__post_init__()
-        import warnings
-
-        with warnings.catch_warnings():
-            warnings.simplefilter("always")
-            warnings.warn(
-                "DailyInputTransportMessageUrgentFrame is deprecated and will be removed in a future version. "
-                "Instead, use DailyInputTransportMessageFrame.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
 
 
 @dataclass
@@ -676,15 +599,19 @@ class DailyTransportClient(EventHandler):
             await asyncio.sleep(0.01)
             return None
 
-    async def register_audio_destination(self, destination: str):
+    async def register_audio_destination(
+        self, destination: str, auto_silence: Optional[bool] = True
+    ):
         """Register a custom audio destination for multi-track output.
 
         Args:
             destination: The destination identifier to register.
+            auto_silence: If True, the audio source inserts silence when no audio is available.
+                If False, the source waits for audio data. Defaults to True.
         """
         params = (self._params.custom_audio_track_params or {}).get(destination)
         self._custom_audio_tracks[destination] = await self.add_custom_audio_track(
-            destination, params=params
+            destination, params=params, auto_silence=auto_silence
         )
         publishing: Dict[str, Any] = {"customAudio": {destination: True}}
         if params and params.send_settings:
@@ -831,7 +758,14 @@ class DailyTransportClient(EventHandler):
             self._camera_track = DailyVideoTrack(source=video_source, track=video_track)
 
         if self._params.audio_out_enabled and not self._microphone_track:
-            audio_source = CustomAudioSource(self._out_sample_rate, self._params.audio_out_channels)
+            logger.debug(
+                f"Creating custom audio source, auto silence {self._params.audio_out_auto_silence}"
+            )
+            audio_source = CustomAudioSource(
+                self._out_sample_rate,
+                self._params.audio_out_channels,
+                self._params.audio_out_auto_silence,
+            )
             audio_track = CustomAudioTrack(audio_source)
             self._microphone_track = DailyAudioTrack(source=audio_source, track=audio_track)
 
@@ -1269,12 +1203,15 @@ class DailyTransportClient(EventHandler):
         self,
         track_name: str,
         params: Optional[DailyCustomAudioTrackParams] = None,
+        auto_silence: Optional[bool] = True,
     ) -> DailyAudioTrack:
         """Add a custom audio track for multi-stream output.
 
         Args:
             track_name: Name for the custom audio track.
             params: Optional per-track configuration for sample rate, channels, and sendSettings.
+            auto_silence: If True, the audio source inserts silence when no audio is available.
+                If False, the source waits for audio data. Defaults to True.
 
         Returns:
             The created DailyAudioTrack instance.
@@ -1284,7 +1221,7 @@ class DailyTransportClient(EventHandler):
         sample_rate = params.sample_rate if params and params.sample_rate else self._out_sample_rate
         channels = params.channels if params else 1
 
-        audio_source = CustomAudioSource(sample_rate, channels)
+        audio_source = CustomAudioSource(sample_rate, channels, auto_silence)
 
         audio_track = CustomAudioTrack(audio_source)
 
@@ -1773,17 +1710,6 @@ class DailyInputTransport(BaseInputTransport):
 
         # Audio task when using a virtual speaker (i.e. no user tracks).
         self._audio_in_task: Optional[asyncio.Task] = None
-
-        self._vad_analyzer: Optional[VADAnalyzer] = params.vad_analyzer
-
-    @property
-    def vad_analyzer(self) -> Optional[VADAnalyzer]:
-        """Get the Voice Activity Detection analyzer.
-
-        Returns:
-            The VAD analyzer instance if configured.
-        """
-        return self._vad_analyzer
 
     async def start_audio_in_streaming(self):
         """Start receiving audio from participants."""

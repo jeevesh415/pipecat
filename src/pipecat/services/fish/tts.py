@@ -21,12 +21,10 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
-    InterruptionFrame,
     StartFrame,
     TTSAudioRawFrame,
     TTSStoppedFrame,
 )
-from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
 from pipecat.services.tts_service import InterruptibleTTSService
 from pipecat.transcriptions.language import Language
@@ -112,7 +110,6 @@ class FishAudioTTSService(InterruptibleTTSService):
         *,
         api_key: str,
         reference_id: Optional[str] = None,  # This is the voice ID
-        model: Optional[str] = None,  # Deprecated
         model_id: Optional[str] = None,
         output_format: FishAudioOutputFormat = "pcm",
         sample_rate: Optional[int] = None,
@@ -128,12 +125,6 @@ class FishAudioTTSService(InterruptibleTTSService):
 
                 .. deprecated:: 0.0.105
                     Use ``settings=FishAudioTTSService.Settings(voice=...)`` instead.
-
-            model: Deprecated. Reference ID of the voice model to use for synthesis.
-
-                .. deprecated:: 0.0.74
-                    The ``model`` parameter is deprecated and will be removed in version 0.1.0.
-                    Use ``reference_id`` instead to specify the voice model.
 
             model_id: Specify which Fish Audio TTS model to use (e.g. "s1").
 
@@ -151,25 +142,6 @@ class FishAudioTTSService(InterruptibleTTSService):
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional arguments passed to the parent service.
         """
-        # Validation for model and reference_id parameters
-        if model and reference_id:
-            raise ValueError(
-                "Cannot specify both 'model' and 'reference_id'. Use 'reference_id' only."
-            )
-
-        if model:
-            import warnings
-
-            with warnings.catch_warnings():
-                warnings.simplefilter("always")
-                warnings.warn(
-                    "Parameter 'model' is deprecated and will be removed in a future version. "
-                    "Use 'reference_id' instead.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-            reference_id = model
-
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
             model="s2-pro",
@@ -362,9 +334,10 @@ class FishAudioTTSService(InterruptibleTTSService):
             return self._websocket
         raise Exception("Websocket not connected")
 
-    async def _handle_interruption(self, frame: InterruptionFrame, direction: FrameDirection):
-        await super()._handle_interruption(frame, direction)
+    async def on_audio_context_interrupted(self, context_id: str):
+        """Stop all metrics when audio context is interrupted."""
         await self.stop_all_metrics()
+        await super().on_audio_context_interrupted(context_id)
 
     async def _receive_messages(self):
         async for message in self._get_websocket():
@@ -377,8 +350,14 @@ class FishAudioTTSService(InterruptibleTTSService):
                             audio_data = msg.get("audio")
                             # Only process larger chunks to remove msgpack overhead
                             if audio_data and len(audio_data) > 1024:
-                                frame = TTSAudioRawFrame(audio_data, self.sample_rate, 1)
-                                await self.push_frame(frame)
+                                context_id = self.get_active_audio_context_id()
+                                frame = TTSAudioRawFrame(
+                                    audio_data,
+                                    self.sample_rate,
+                                    1,
+                                    context_id=context_id,
+                                )
+                                await self.append_to_audio_context(context_id, frame)
                                 await self.stop_ttfb_metrics()
                         elif event == "finish":
                             reason = msg.get("reason", "unknown")

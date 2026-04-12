@@ -207,7 +207,7 @@ async def configure(
         return DailyRoomConfig(room_url=room_url, token=token)
 
     # Create a new room
-    room_prefix = "pipecat-sip" if sip_enabled else "pipecat"
+    room_prefix = "pipecat-telephony" if (sip_enabled or enable_dialout) else "pipecat"
     room_name = f"{room_prefix}-{uuid.uuid4().hex[:8]}"
     logger.info(f"Creating new Daily room: {room_name}")
 
@@ -225,6 +225,9 @@ async def configure(
         if room_geo:
             room_properties.geo = room_geo
 
+        if enable_dialout:
+            room_properties.enable_dialout = True
+
         # Add SIP configuration if enabled
         if sip_enabled:
             sip_params = DailyRoomSipParams(
@@ -236,7 +239,6 @@ async def configure(
                 provider=sip_provider,
             )
             room_properties.sip = sip_params
-            room_properties.enable_dialout = enable_dialout
             room_properties.start_video_off = not sip_enable_video  # Voice-only by default
 
     # Create room parameters
@@ -273,32 +275,3 @@ async def configure(
         error_msg = f"Error creating Daily room: {e}"
         logger.error(error_msg)
         raise
-
-
-# Keep this for backwards compatibility, but mark as deprecated
-async def configure_with_args(aiohttp_session: aiohttp.ClientSession, parser=None):
-    """Configure Daily room with command-line argument parsing.
-
-    .. deprecated:: 0.0.78
-        This function is deprecated. Use configure() instead which uses
-        environment variables only.
-
-    Args:
-        aiohttp_session: HTTP session for making API requests.
-        parser: Ignored. Kept for backwards compatibility.
-
-    Returns:
-        Tuple containing room URL, authentication token, and None (for args).
-    """
-    import warnings
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("always")
-        warnings.warn(
-            "configure_with_args is deprecated. Use configure() instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-
-    room_url, token = await configure(aiohttp_session)
-    return (room_url, token, None)
