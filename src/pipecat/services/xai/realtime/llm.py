@@ -13,9 +13,11 @@ https://docs.x.ai/docs/guides/voice/agent
 import base64
 import json
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from dataclasses import fields as dataclass_fields
-from typing import Any, Dict, Mapping, Optional, Type
+from typing import Any
+from urllib.parse import quote
 
 from loguru import logger
 
@@ -45,13 +47,15 @@ from pipecat.frames.frames import (
     UserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators import async_tool_messages
+from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallFromLLM, LLMService
 from pipecat.services.settings import (
     NOT_GIVEN,
     LLMSettings,
     _NotGiven,
+    assert_given,
     is_given,
 )
 from pipecat.utils.time import time_now_iso8601
@@ -110,7 +114,7 @@ class GrokRealtimeLLMSettings(LLMSettings):
 
     # -- apply_update override -----------------------------------------------
 
-    def apply_update(self, delta: "GrokRealtimeLLMService.Settings") -> Dict[str, Any]:
+    def apply_update(self, delta: "GrokRealtimeLLMService.Settings") -> dict[str, Any]:
         """Merge a delta, keeping ``system_instruction`` in sync with SP.
 
         When the delta contains ``session_properties``, it **replaces** the
@@ -142,7 +146,7 @@ class GrokRealtimeLLMSettings(LLMSettings):
 
     @classmethod
     def from_mapping(
-        cls: Type["GrokRealtimeLLMService.Settings"], settings: Mapping[str, Any]
+        cls: type["GrokRealtimeLLMService.Settings"], settings: Mapping[str, Any]
     ) -> "GrokRealtimeLLMService.Settings":
         """Build a delta from a plain dict, routing SP keys into ``session_properties``.
 
@@ -153,9 +157,9 @@ class GrokRealtimeLLMSettings(LLMSettings):
         # Determine which keys belong to our own dataclass fields.
         own_field_names = {f.name for f in dataclass_fields(cls)} - {"extra"}
 
-        top: Dict[str, Any] = {}
-        sp_dict: Dict[str, Any] = {}
-        extra: Dict[str, Any] = {}
+        top: dict[str, Any] = {}
+        sp_dict: dict[str, Any] = {}
+        extra: dict[str, Any] = {}
 
         sp_keys = set(events.SessionProperties.model_fields.keys())
 
@@ -177,7 +181,7 @@ class GrokRealtimeLLMSettings(LLMSettings):
         return instance
 
 
-class GrokRealtimeLLMService(LLMService):
+class GrokRealtimeLLMService(LLMService[GrokRealtimeLLMAdapter]):
     """Grok Realtime Voice Agent LLM service providing real-time audio and text communication.
 
     Implements the Grok Voice Agent API with WebSocket communication for low-latency
@@ -204,8 +208,8 @@ class GrokRealtimeLLMService(LLMService):
         *,
         api_key: str,
         base_url: str = "wss://api.x.ai/v1/realtime",
-        session_properties: Optional[events.SessionProperties] = None,
-        settings: Optional[Settings] = None,
+        session_properties: events.SessionProperties | None = None,
+        settings: Settings | None = None,
         start_audio_paused: bool = False,
         **kwargs,
     ):
@@ -233,7 +237,7 @@ class GrokRealtimeLLMService(LLMService):
         """
         # 1. Initialize default_settings with hardcoded defaults
         default_settings = self.Settings(
-            model=None,
+            model="grok-voice-think-fast-1.0",
             system_instruction=None,
             temperature=None,
             max_tokens=None,
@@ -308,7 +312,7 @@ class GrokRealtimeLLMService(LLMService):
         """
         self._audio_input_paused = paused
 
-    def _get_configured_sample_rate(self, direction: str) -> Optional[int]:
+    def _get_configured_sample_rate(self, direction: str) -> int | None:
         """Get manually configured sample rate for input or output.
 
         Args:
@@ -318,13 +322,14 @@ class GrokRealtimeLLMService(LLMService):
             Configured sample rate or None if not manually configured.
             For PCMU/PCMA formats, returns 8000 Hz (G.711 standard).
         """
-        if not self._settings.session_properties.audio:
+        session_properties = assert_given(self._settings.session_properties)
+        if not session_properties.audio:
             return None
 
         audio_config = (
-            self._settings.session_properties.audio.input
+            session_properties.audio.input
             if direction == "input"
-            else self._settings.session_properties.audio.output
+            else session_properties.audio.output
         )
 
         if audio_config and audio_config.format:
@@ -354,8 +359,9 @@ class GrokRealtimeLLMService(LLMService):
 
     def _is_turn_detection_enabled(self) -> bool:
         """Check if server-side VAD is enabled."""
-        if self._settings.session_properties.turn_detection:
-            return self._settings.session_properties.turn_detection.type == "server_vad"
+        session_properties = assert_given(self._settings.session_properties)
+        if session_properties.turn_detection:
+            return session_properties.turn_detection.type == "server_vad"
         return False
 
     async def _handle_interruption(self):
@@ -422,7 +428,7 @@ class GrokRealtimeLLMService(LLMService):
             input_sample_rate: Sample rate for audio input (Hz).
             output_sample_rate: Sample rate for audio output (Hz).
         """
-        props = self._settings.session_properties
+        props = assert_given(self._settings.session_properties)
         if not props.audio:
             props.audio = events.AudioConfiguration()
         if not props.audio.input:
@@ -529,8 +535,13 @@ class GrokRealtimeLLMService(LLMService):
             if self._websocket:
                 return
 
+            # Model is selected via query param at connection time; xAI does
+            # not support changing it via session.update.
+            model = assert_given(self._settings.model)
+            uri = f"{self.base_url}?model={quote(model, safe='')}"
+
             self._websocket = await websocket_connect(
-                uri=self.base_url,
+                uri=uri,
                 additional_headers={
                     "Authorization": f"Bearer {self.api_key}",
                 },
@@ -591,12 +602,13 @@ class GrokRealtimeLLMService(LLMService):
 
     async def _send_session_update(self):
         """Update session settings on the server."""
-        settings = self._settings.session_properties
-        adapter: GrokRealtimeLLMAdapter = self.get_llm_adapter()
+        settings = assert_given(self._settings.session_properties)
+        adapter = self.get_llm_adapter()
 
         if self._context:
             llm_invocation_params = adapter.get_llm_invocation_params(
-                self._context, system_instruction=self._settings.system_instruction
+                self._context,
+                system_instruction=assert_given(self._settings.system_instruction),
             )
 
             if llm_invocation_params["tools"]:
@@ -866,7 +878,7 @@ class GrokRealtimeLLMService(LLMService):
             self._run_llm_when_api_session_ready = True
             return
 
-        adapter: GrokRealtimeLLMAdapter = self.get_llm_adapter()
+        adapter = self.get_llm_adapter()
 
         if self._llm_needs_conversation_setup:
             logger.debug(
@@ -902,6 +914,50 @@ class GrokRealtimeLLMService(LLMService):
         sent_new_result = False
 
         for message in self._context.get_messages():
+            # LLMSpecificMessages are opaque provider-specific payloads, not
+            # standard tool-result messages — skip them.
+            if isinstance(message, LLMSpecificMessage):
+                continue
+
+            # Async-tool messages live alongside regular tool messages in the
+            # context; detect and route them before the regular logic so we
+            # don't try to send the async-tool envelope JSON as a tool result.
+            async_payload = async_tool_messages.parse_message(message)
+            if async_payload is not None:
+                if async_payload.tool_call_id in self._completed_tool_calls:
+                    continue
+                if async_payload.kind == "started":
+                    # The provider already issued the tool call and natively
+                    # awaits a result; nothing to send for the started marker.
+                    continue
+                if async_payload.kind == "intermediate":
+                    logger.error(
+                        f"{self}: Grok Realtime does not support streamed async "
+                        f"tool results; dropping intermediate result for "
+                        f"tool_call_id={async_payload.tool_call_id}. Use a "
+                        f"non-realtime LLM service if your tool needs to "
+                        f"stream intermediate results."
+                    )
+                    await self.push_error(
+                        error_msg="Grok Realtime does not support streamed async tool results.",
+                    )
+                    continue
+                if async_payload.kind == "final":
+                    # Deliver via the formal tool-result channel — same path
+                    # as a synchronous tool result, just delayed.
+                    if send_new_results:
+                        sent_new_result = True
+                        await self._send_tool_result(
+                            async_payload.tool_call_id, async_payload.result
+                        )
+                    self._completed_tool_calls.add(async_payload.tool_call_id)
+                    continue
+                # Defensive: any async-tool message must not fall through
+                # to the regular tool-result block below, even if it
+                # carries a kind we don't recognize.
+                continue
+
+            # Look for newly-completed "regular" (as opposed to async-tool) results
             if message.get("role") and message.get("content") != "IN_PROGRESS":
                 tool_call_id = message.get("tool_call_id")
                 if tool_call_id and tool_call_id not in self._completed_tool_calls:
@@ -928,6 +984,7 @@ class GrokRealtimeLLMService(LLMService):
 
     async def _send_tool_result(self, tool_call_id: str, result: str):
         """Send a tool call result to Grok."""
+        logger.debug(f"Sending tool result to Grok Realtime for tool_call_id={tool_call_id}")
         item = events.ConversationItem(
             type="function_call_output",
             call_id=tool_call_id,

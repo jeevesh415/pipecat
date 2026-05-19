@@ -16,8 +16,9 @@ Provides two STT services:
 
 import base64
 import json
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, Literal, Optional, Union
+from typing import Any, Literal, cast
 
 from loguru import logger
 
@@ -35,7 +36,8 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.openai._constants import OPENAI_REALTIME_WHISPER_MODEL, OPENAI_SAMPLE_RATE
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_latency import OPENAI_REALTIME_TTFS_P99, OPENAI_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.services.whisper.base_stt import (
@@ -74,14 +76,14 @@ class OpenAISTTService(BaseWhisperSTTService):
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        language: Optional[Language] = Language.EN,
-        prompt: Optional[str] = None,
-        temperature: Optional[float] = None,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = OPENAI_TTFS_P99,
+        model: str | None = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        language: Language | None = Language.EN,
+        prompt: str | None = None,
+        temperature: float | None = None,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = OPENAI_TTFS_P99,
         **kwargs,
     ):
         """Initialize OpenAI STT service.
@@ -177,15 +179,13 @@ class OpenAISTTService(BaseWhisperSTTService):
         return await self._client.audio.transcriptions.create(**kwargs)
 
 
-_OPENAI_SAMPLE_RATE = 24000
-
-
 @dataclass
 class OpenAIRealtimeSTTSettings(STTSettings):
     """Settings for OpenAIRealtimeSTTService.
 
     Parameters:
-        prompt: Optional prompt text to guide transcription style.
+        prompt: Optional prompt text to guide transcription style. Not supported by
+            ``"gpt-realtime-whisper"``.
         noise_reduction: Noise reduction mode. ``"near_field"`` for close
             microphones, ``"far_field"`` for distant microphones, or ``None``
             to disable.
@@ -226,7 +226,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         stt = OpenAIRealtimeSTTService(
             api_key="sk-...",
             settings=OpenAIRealtimeSTTService.Settings(
-                model="gpt-4o-transcribe",
+                model="gpt-realtime-whisper",
                 noise_reduction="near_field",
             ),
         )
@@ -239,22 +239,24 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         self,
         *,
         api_key: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         base_url: str = "wss://api.openai.com/v1/realtime",
-        language: Optional[Language] = Language.EN,
-        prompt: Optional[str] = None,
-        turn_detection: Optional[Union[dict, Literal[False]]] = False,
-        noise_reduction: Optional[Literal["near_field", "far_field"]] = None,
+        language: Language | None = Language.EN,
+        prompt: str | None = None,
+        turn_detection: dict | Literal[False] | None = False,
+        noise_reduction: Literal["near_field", "far_field"] | None = None,
         should_interrupt: bool = True,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = OPENAI_REALTIME_TTFS_P99,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = OPENAI_REALTIME_TTFS_P99,
         **kwargs,
     ):
         """Initialize the OpenAI Realtime STT service.
 
         Args:
             api_key: OpenAI API key for authentication.
-            model: Transcription model. Supported values are
+            model: Transcription model. For low-latency streaming
+                transcription, use ``"gpt-realtime-whisper"``. Other
+                supported transcription models include
                 ``"gpt-4o-transcribe"`` and ``"gpt-4o-mini-transcribe"``.
 
                 .. deprecated:: 0.0.105
@@ -268,7 +270,8 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
                     Use ``settings=OpenAIRealtimeSTTService.Settings(language=...)`` instead.
 
             prompt: Optional prompt text to guide transcription style
-                or provide keyword hints.
+                or provide keyword hints. Not supported by
+                ``"gpt-realtime-whisper"``.
 
                 .. deprecated:: 0.0.105
                     Use ``settings=OpenAIRealtimeSTTService.Settings(prompt=...)`` instead.
@@ -302,7 +305,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
 
         # --- 1. Hardcoded defaults ---
         default_settings = self.Settings(
-            model="gpt-4o-transcribe",
+            model=OPENAI_REALTIME_WHISPER_MODEL,
             language=Language.EN,
             prompt=None,
             noise_reduction=None,
@@ -328,6 +331,8 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         if settings is not None:
             default_settings.apply_update(settings)
 
+        self._omit_unsupported_prompt(default_settings)
+
         super().__init__(
             ttfs_p99_latency=ttfs_p99_latency,
             settings=default_settings,
@@ -347,6 +352,19 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         # Server-side VAD is disabled by default (turn_detection=False).
         # Set to None or a dict to enable server-side VAD.
         self._server_vad_enabled = turn_detection is not False
+
+    @staticmethod
+    def _omit_unsupported_prompt(settings: OpenAIRealtimeSTTSettings) -> dict[str, Any]:
+        """Drop prompt settings that are not accepted by the selected model."""
+        if settings.model == OPENAI_REALTIME_WHISPER_MODEL and settings.prompt:
+            old_prompt = settings.prompt
+            settings.prompt = None
+            logger.warning(
+                f"{OPENAI_REALTIME_WHISPER_MODEL} does not support the prompt parameter; "
+                "omitting prompt from OpenAI Realtime transcription session."
+            )
+            return {"prompt": old_prompt}
+        return {}
 
     @staticmethod
     def _language_to_code(language: Language) -> str:
@@ -381,6 +399,8 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
             Dict mapping changed field names to their previous values.
         """
         changed = await super()._update_settings(delta)
+        for field, previous_value in self._omit_unsupported_prompt(self._settings).items():
+            changed.setdefault(field, previous_value)
 
         if changed and self._session_ready:
             await self._send_session_update()
@@ -414,7 +434,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to the transcription session.
 
         Audio is streamed over the WebSocket. Transcription results arrive
@@ -474,6 +494,9 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
     async def _connect_websocket(self):
         """Establish the WebSocket connection to the transcription endpoint."""
         try:
+            # `__init__` raises if websockets isn't installed, so these symbols
+            # are non-None by the time any method runs.
+            assert websocket_connect is not None and State is not None
             if self._websocket and self._websocket.state is State.OPEN:
                 return
 
@@ -533,9 +556,10 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         """Send ``session.update`` to configure the transcription session."""
         transcription: dict = {"model": self._settings.model}
 
-        language_code = (
-            self._language_to_code(self._settings.language) if self._settings.language else None
-        )
+        # Technically `_settings.language` could be a raw string, but Language
+        # is a StrEnum so downstream handles either.
+        language = cast("Language | None", assert_given(self._settings.language))
+        language_code = self._language_to_code(language) if language else None
         if language_code:
             transcription["language"] = language_code
 
@@ -545,7 +569,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         input_audio: dict = {
             "format": {
                 "type": "audio/pcm",
-                "rate": _OPENAI_SAMPLE_RATE,
+                "rate": OPENAI_SAMPLE_RATE,
             },
             "transcription": transcription,
         }
@@ -582,7 +606,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         Args:
             audio: Raw audio bytes at the pipeline sample rate.
         """
-        audio = await self._resampler.resample(audio, self.sample_rate, _OPENAI_SAMPLE_RATE)
+        audio = await self._resampler.resample(audio, self.sample_rate, OPENAI_SAMPLE_RATE)
         if not audio:
             return
         payload = base64.b64encode(audio).decode("utf-8")
@@ -611,6 +635,10 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         Called by ``WebsocketService._receive_task_handler`` which wraps
         this method with automatic reconnection on connection errors.
         """
+        # `_connect` only starts the receive task after `_websocket` is set,
+        # and reconnects re-establish it before the next iteration, so this
+        # invariant should always hold when this method runs.
+        assert self._websocket is not None
         async for message in self._websocket:
             try:
                 evt = json.loads(message)
@@ -667,9 +695,9 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
     async def _handle_transcription_delta(self, evt: dict):
         """Handle incremental transcription text.
 
-        For ``gpt-4o-transcribe`` and ``gpt-4o-mini-transcribe``, deltas
-        contain streaming partial text. For ``whisper-1``, each delta
-        contains the full turn transcript.
+        For ``gpt-realtime-whisper``, ``gpt-4o-transcribe``, and
+        ``gpt-4o-mini-transcribe``, deltas contain low-latency streaming
+        partial text.
 
         Args:
             evt: The delta event from the server.
@@ -712,7 +740,7 @@ class OpenAIRealtimeSTTService(WebsocketSTTService):
         self,
         transcript: str,
         is_final: bool,
-        language: Optional[Language] = None,
+        language: Language | None = None,
     ):
         """Record transcription result for tracing.
 

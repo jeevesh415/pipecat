@@ -10,8 +10,9 @@ This module provides integration with OpenAI's text-to-speech API for
 generating high-quality synthetic speech from text input.
 """
 
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import AsyncGenerator, Dict, Literal, Optional
+from typing import Literal
 
 from loguru import logger
 from openai import AsyncOpenAI, BadRequestError
@@ -23,7 +24,8 @@ from pipecat.frames.frames import (
     StartFrame,
     TTSAudioRawFrame,
 )
-from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven
+from pipecat.services.openai._constants import OPENAI_SAMPLE_RATE
+from pipecat.services.settings import NOT_GIVEN, TTSSettings, _NotGiven, assert_given
 from pipecat.services.tts_service import TTSService
 from pipecat.utils.tracing.service_decorators import traced_tts
 
@@ -43,7 +45,7 @@ ValidVoice = Literal[
     "verse",
 ]
 
-VALID_VOICES: Dict[str, ValidVoice] = {
+VALID_VOICES: dict[str, ValidVoice] = {
     "alloy": "alloy",
     "ash": "ash",
     "ballad": "ballad",
@@ -69,8 +71,8 @@ class OpenAITTSSettings(TTSSettings):
         speed: Voice speed control (0.25 to 4.0, default 1.0).
     """
 
-    instructions: str | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
-    speed: float | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    instructions: str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    speed: float | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
 class OpenAITTSService(TTSService):
@@ -84,8 +86,6 @@ class OpenAITTSService(TTSService):
     Settings = OpenAITTSSettings
     _settings: Settings
 
-    OPENAI_SAMPLE_RATE = 24000  # OpenAI TTS always outputs at 24kHz
-
     class InputParams(BaseModel):
         """Input parameters for OpenAI TTS configuration.
 
@@ -97,21 +97,21 @@ class OpenAITTSService(TTSService):
             speed: Voice speed control (0.25 to 4.0, default 1.0).
         """
 
-        instructions: Optional[str] = None
-        speed: Optional[float] = None
+        instructions: str | None = None
+        speed: float | None = None
 
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        base_url: Optional[str] = None,
-        voice: Optional[str] = None,
-        model: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        instructions: Optional[str] = None,
-        speed: Optional[float] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        voice: str | None = None,
+        model: str | None = None,
+        sample_rate: int | None = None,
+        instructions: str | None = None,
+        speed: float | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         **kwargs,
     ):
         """Initialize OpenAI TTS service.
@@ -149,9 +149,9 @@ class OpenAITTSService(TTSService):
                 parameters, ``settings`` values take precedence.
             **kwargs: Additional keyword arguments passed to TTSService.
         """
-        if sample_rate and sample_rate != self.OPENAI_SAMPLE_RATE:
+        if sample_rate and sample_rate != OPENAI_SAMPLE_RATE:
             logger.warning(
-                f"OpenAI TTS only supports {self.OPENAI_SAMPLE_RATE}Hz sample rate. "
+                f"OpenAI TTS only supports {OPENAI_SAMPLE_RATE}Hz sample rate. "
                 f"Current rate of {sample_rate}Hz may cause issues."
             )
 
@@ -216,9 +216,9 @@ class OpenAITTSService(TTSService):
             frame: The start frame containing initialization parameters.
         """
         await super().start(frame)
-        if self.sample_rate != self.OPENAI_SAMPLE_RATE:
+        if self.sample_rate != OPENAI_SAMPLE_RATE:
             logger.warning(
-                f"OpenAI TTS requires {self.OPENAI_SAMPLE_RATE}Hz sample rate. "
+                f"OpenAI TTS requires {OPENAI_SAMPLE_RATE}Hz sample rate. "
                 f"Current rate of {self.sample_rate}Hz may cause issues."
             )
 
@@ -234,12 +234,22 @@ class OpenAITTSService(TTSService):
             Frame: Audio frames containing the synthesized speech data.
         """
         logger.debug(f"{self}: Generating TTS [{text}]")
+        voice = assert_given(self._settings.voice)
+        if voice is None:
+            yield ErrorFrame(error="OpenAI TTS voice must be specified")
+            return
+        if voice not in VALID_VOICES:
+            yield ErrorFrame(
+                error=f"OpenAI TTS voice {voice!r} is not supported "
+                f"(must be one of: {', '.join(sorted(VALID_VOICES))})"
+            )
+            return
         try:
             # Setup API parameters
             create_params = {
                 "input": text,
                 "model": self._settings.model,
-                "voice": VALID_VOICES[self._settings.voice],
+                "voice": VALID_VOICES[voice],
                 "response_format": "pcm",
             }
 

@@ -13,7 +13,6 @@ streaming responses, and tool usage.
 
 import json
 from dataclasses import dataclass
-from typing import List, Optional, Union
 
 from loguru import logger
 
@@ -61,21 +60,21 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
     def __init__(
         self,
         *,
-        credentials: Optional[str] = None,
-        credentials_path: Optional[str] = None,
+        credentials: str | None = None,
+        credentials_path: str | None = None,
         location: str,
         project_id: str,
-        model: Optional[str] = None,
+        model: str | None = None,
         voice_id: str = "Charon",
         start_audio_paused: bool = False,
         start_video_paused: bool = False,
-        system_instruction: Optional[str] = None,
-        tools: Optional[Union[List[dict], ToolsSchema]] = None,
-        params: Optional[InputParams] = None,
-        settings: Optional[Settings] = None,
+        system_instruction: str | None = None,
+        tools: list[dict] | ToolsSchema | None = None,
+        params: InputParams | None = None,
+        settings: Settings | None = None,
         inference_on_context_initialization: bool = True,
         file_api_base_url: str = "https://generativelanguage.googleapis.com/v1beta/files",
-        http_options: Optional[HttpOptions] = None,
+        http_options: HttpOptions | None = None,
         **kwargs,
     ):
         """Initialize the service for accessing Gemini Live via Google Vertex AI.
@@ -175,11 +174,17 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
                 default_settings.temperature = params.temperature
                 default_settings.top_k = params.top_k
                 default_settings.top_p = params.top_p
-                default_settings.modalities = params.modalities
+                # `params.modalities` and `params.media_resolution` are typed
+                # `<Enum> | None` on the deprecated InputParams, but None isn't
+                # a valid setting value (downstream uses call `.value` on
+                # them). Fall back to the canonical defaults.
+                default_settings.modalities = params.modalities or GeminiModalities.AUDIO
                 default_settings.language = (
                     language_to_gemini_language(params.language) if params.language else "en-US"
                 )
-                default_settings.media_resolution = params.media_resolution
+                default_settings.media_resolution = (
+                    params.media_resolution or GeminiMediaResolution.UNSPECIFIED
+                )
                 default_settings.vad = params.vad
                 default_settings.context_window_compression = (
                     params.context_window_compression.model_dump()
@@ -233,8 +238,24 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
             "When using Vertex AI, the recommended approach is to use Google Cloud Storage for file handling. The Gemini File API is not directly supported in this context."
         )
 
+    @property
+    def _supports_non_blocking_tools(self) -> bool:
+        """Vertex AI's Gemini Live endpoint does not yet support NON_BLOCKING tool calls.
+
+        Override the base ``GeminiLiveLLMService`` getter to disable the
+        NON_BLOCKING ``behavior`` field on function declarations and the
+        ``scheduling`` field on FunctionResponse for Vertex sessions —
+        sending either appears to break tool calling against Vertex.
+        Users hitting this on a function registered with
+        ``cancel_on_interruption=False`` will see the same one-time
+        warning the base class surfaces for unsupported models.
+        """
+        return False
+
     @staticmethod
-    def _get_credentials(credentials: Optional[str], credentials_path: Optional[str]) -> str:
+    def _get_credentials(
+        credentials: str | None, credentials_path: str | None
+    ) -> service_account.Credentials:
         """Retrieve Credentials using Google service account credentials JSON.
 
         Supports multiple authentication methods:
@@ -247,12 +268,13 @@ class GeminiLiveVertexLLMService(GeminiLiveLLMService):
             credentials_path: Path to the service account JSON file.
 
         Returns:
-            OAuth token for API authentication.
+            A service-account ``Credentials`` object suitable for the Vertex
+            AI client (with its access token refreshed).
 
         Raises:
             ValueError: If no valid credentials are provided or found.
         """
-        creds: Optional[service_account.Credentials] = None
+        creds: service_account.Credentials | None = None
 
         if credentials:
             # Parse and load credentials from JSON string

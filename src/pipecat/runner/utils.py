@@ -32,7 +32,8 @@ Example::
 import json
 import os
 import re
-from typing import Any, Callable, Dict, Optional
+from collections.abc import Callable
+from typing import Any, cast
 
 from fastapi import WebSocket
 from loguru import logger
@@ -41,9 +42,10 @@ from pipecat.runner.types import (
     DailyRunnerArguments,
     LiveKitRunnerArguments,
     SmallWebRTCRunnerArguments,
+    VonageRunnerArguments,
     WebSocketRunnerArguments,
 )
-from pipecat.transports.base_transport import BaseTransport
+from pipecat.transports.base_transport import BaseTransport, TransportParams
 
 
 def _detect_transport_type_from_message(message_data: dict) -> str:
@@ -270,6 +272,14 @@ def get_transport_client_id(transport: BaseTransport, client: Any) -> str:
     except ImportError:
         pass
 
+    try:
+        from pipecat.transports.vonage.video_connector import VonageVideoConnectorTransport
+
+        if isinstance(transport, VonageVideoConnectorTransport):
+            return client["streamId"]
+    except ImportError:
+        pass
+
     logger.warning(f"Unable to get client id from unsupported transport {type(transport)}")
     return ""
 
@@ -299,6 +309,24 @@ async def maybe_capture_participant_camera(
 
         if isinstance(transport, SmallWebRTCTransport):
             await transport.capture_participant_video(video_source="camera")
+    except ImportError:
+        pass
+
+    try:
+        from pipecat.transports.vonage.video_connector import (
+            SubscribeSettings,
+            VonageVideoConnectorTransport,
+        )
+
+        if isinstance(transport, VonageVideoConnectorTransport):
+            await transport.subscribe_to_stream(
+                client["streamId"],
+                SubscribeSettings(
+                    subscribe_to_audio=True,
+                    subscribe_to_video=True,
+                    preferred_framerate=framerate if framerate != 0 else None,
+                ),
+            )
     except ImportError:
         pass
 
@@ -373,7 +401,7 @@ def _smallwebrtc_sdp_cleanup_fingerprints(text: str) -> str:
     return "\r\n".join(result) + "\r\n"
 
 
-def smallwebrtc_sdp_munging(sdp: str, host: Optional[str]) -> str:
+def smallwebrtc_sdp_munging(sdp: str, host: str | None) -> str:
     """Apply SDP modifications for SmallWebRTC compatibility.
 
     Args:
@@ -389,7 +417,7 @@ def smallwebrtc_sdp_munging(sdp: str, host: Optional[str]) -> str:
     return sdp
 
 
-def _get_transport_params(transport_key: str, transport_params: Dict[str, Callable]) -> Any:
+def _get_transport_params(transport_key: str, transport_params: dict[str, Callable]) -> Any:
     """Get transport parameters from factory function.
 
     Args:
@@ -415,9 +443,9 @@ def _get_transport_params(transport_key: str, transport_params: Dict[str, Callab
 
 async def _create_telephony_transport(
     websocket: WebSocket,
-    params: Optional[Any] = None,
-    transport_type: str = None,
-    call_data: dict = None,
+    params: Any,
+    transport_type: str,
+    call_data: dict,
 ) -> BaseTransport:
     """Create a telephony transport with pre-parsed WebSocket data.
 
@@ -431,12 +459,6 @@ async def _create_telephony_transport(
         Configured FastAPIWebsocketTransport ready for telephony use.
     """
     from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
-
-    if params is None:
-        raise ValueError(
-            "FastAPIWebsocketParams must be provided. "
-            "The serializer and add_wav_header will be set automatically."
-        )
 
     # Always set add_wav_header to False for telephony
     params.add_wav_header = False
@@ -488,7 +510,7 @@ async def _create_telephony_transport(
 
 
 async def create_transport(
-    runner_args: Any, transport_params: Dict[str, Callable]
+    runner_args: Any, transport_params: dict[str, Callable]
 ) -> BaseTransport:
     """Create a transport from runner arguments using factory functions.
 
@@ -514,36 +536,34 @@ async def create_transport(
             "daily": lambda: DailyParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
             ),
             "webrtc": lambda: TransportParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
             ),
             "twilio": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "telnyx": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "plivo": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
             ),
             "exotel": lambda: FastAPIWebsocketParams(
                 audio_in_enabled=True,
                 audio_out_enabled=True,
-                vad_analyzer=SileroVADAnalyzer(),
                 # add_wav_header and serializer will be set automatically
+            ),
+            "vonage": lambda: VonageVideoConnectorTransportParams(
+                audio_in_enabled=True,
+                audio_out_enabled=True
             ),
         }
 
@@ -573,6 +593,12 @@ async def create_transport(
         )
 
     elif isinstance(runner_args, WebSocketRunnerArguments):
+        if runner_args.transport_type == "websocket":
+            params = _get_transport_params("websocket", transport_params)
+            from pipecat.transports.websocket.fastapi import FastAPIWebsocketTransport
+
+            return FastAPIWebsocketTransport(websocket=runner_args.websocket, params=params)
+
         # Parse once to determine the provider and get data
         transport_type, call_data = await parse_telephony_websocket(runner_args.websocket)
         params = _get_transport_params(transport_type, transport_params)
@@ -592,6 +618,31 @@ async def create_transport(
             runner_args.room_name,
             params=params,
         )
+    elif isinstance(runner_args, VonageRunnerArguments):
+        from pipecat.transports.vonage.video_connector import (
+            VonageVideoConnectorTransport,
+            VonageVideoConnectorTransportParams,
+        )
 
+        try:
+            params = cast(
+                VonageVideoConnectorTransportParams,
+                _get_transport_params("vonage", transport_params),
+            )
+        except ValueError:
+            webrtc_params: TransportParams = cast(
+                TransportParams, _get_transport_params("webrtc", transport_params)
+            )
+            params = VonageVideoConnectorTransportParams(
+                **webrtc_params.model_dump(),
+                video_in_auto_subscribe=True,
+            )
+
+        return VonageVideoConnectorTransport(
+            runner_args.application_id,
+            runner_args.vonage_session_id,
+            runner_args.token,
+            params=params,
+        )
     else:
         raise ValueError(f"Unsupported runner arguments type: {type(runner_args)}")

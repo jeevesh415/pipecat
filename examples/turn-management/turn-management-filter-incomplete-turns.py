@@ -10,7 +10,7 @@ Demonstrates LLM-based turn completion detection to suppress bot responses when
 the user was cut off mid-thought. The LLM outputs one of three markers:
 - ✓ (complete): User finished their thought, respond normally
 - ○ (incomplete short): User was cut off, wait ~5s then prompt
-- ◐ (incomplete long): User needs time to think, wait ~15s then prompt
+- ◐ (incomplete long): User needs time to think, wait ~10s then prompt
 
 When incomplete is detected, the bot's response is suppressed. After the timeout
 expires, the LLM is automatically prompted to re-engage the user.
@@ -41,6 +41,7 @@ from pipecat.services.openai.llm import OpenAILLMService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
+from pipecat.turns.user_turn_strategies import FilterIncompleteUserTurnStrategies
 
 load_dotenv(override=True)
 
@@ -66,40 +67,45 @@ transport_params = {
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(api_key=os.getenv("DEEPGRAM_API_KEY"))
+    stt = DeepgramSTTService(api_key=os.environ["DEEPGRAM_API_KEY"])
 
     llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(
             system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way.",
         ),
     )
 
     tts = CartesiaTTSService(
-        api_key=os.getenv("CARTESIA_API_KEY"),
+        api_key=os.environ["CARTESIA_API_KEY"],
         settings=CartesiaTTSService.Settings(
             voice="71a7ad14-091c-4e8e-a314-022ece01c121",  # British Reading Lady
         ),
     )
 
     context = LLMContext()
+    # `FilterIncompleteUserTurnStrategies` pairs the default detector
+    # chain with `LLMTurnCompletionUserTurnStopStrategy`: detectors
+    # trigger LLM inference but the public `on_user_turn_stopped` event
+    # fires only when the LLM confirms ✓. The LLM marks each response
+    # with one of:
+    # ✓ = complete (respond normally)
+    # ○ = incomplete short (wait 5s, then prompt)
+    # ◐ = incomplete long (wait 10s, then prompt)
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
         user_params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
-            # Enable turn completion filtering - the LLM will output:
-            # ✓ = complete (respond normally)
-            # ○ = incomplete short (wait 5s, then prompt)
-            # ◐ = incomplete long (wait 15s, then prompt)
-            filter_incomplete_user_turns=True,
-            # Optional: customize turn completion behavior
-            # turn_completion_config=TurnCompletionConfig(
-            #     incomplete_short_timeout=5.0,
-            #     incomplete_long_timeout=15.0,
-            #     incomplete_short_prompt="Custom prompt...",
-            #     incomplete_long_prompt="Custom prompt...",
-            #     instructions="Custom turn completion instructions...",
-            # ),
+            user_turn_strategies=FilterIncompleteUserTurnStrategies(
+                # Optional: customize turn completion behavior
+                # config=UserTurnCompletionConfig(
+                #     incomplete_short_timeout=5.0,
+                #     incomplete_long_timeout=10.0,
+                #     incomplete_short_prompt="Custom prompt...",
+                #     incomplete_long_prompt="Custom prompt...",
+                #     instructions="Custom turn completion instructions...",
+                # ),
+            ),
         ),
     )
 

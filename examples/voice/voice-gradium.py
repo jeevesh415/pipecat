@@ -53,23 +53,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
     stt = GradiumSTTService(
-        api_key=os.getenv("GRADIUM_API_KEY"),
-        api_endpoint_base_url="wss://us.api.gradium.ai/api/speech/asr",
+        api_key=os.environ["GRADIUM_API_KEY"],
         settings=GradiumSTTService.Settings(
             language=Language.EN,
         ),
     )
 
     tts = GradiumTTSService(
-        api_key=os.getenv("GRADIUM_API_KEY"),
-        url="wss://us.api.gradium.ai/api/speech/tts",
+        api_key=os.environ["GRADIUM_API_KEY"],
         settings=GradiumTTSService.Settings(
             voice="YTpq7expH9539ERJ",
         ),
     )
 
     llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAILLMService.Settings(
             system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way.",
         ),

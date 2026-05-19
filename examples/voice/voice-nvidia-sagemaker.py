@@ -3,13 +3,15 @@
 #
 # SPDX-License-Identifier: BSD 2-Clause License
 #
-
+# For a full example of how to deploy to SageMaker, see:
+# https://github.com/pipecat-ai/pipecat-examples/tree/main/nvidia_sagemaker_example/deployment/aws-sagemaker-nvidia
 
 import os
 
 from dotenv import load_dotenv
 from loguru import logger
 
+from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -21,16 +23,14 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.deepgram.stt import DeepgramSTTService
-from pipecat.services.deepgram.tts import DeepgramTTSService
-from pipecat.services.openai.llm import OpenAILLMService
+from pipecat.services.nvidia.llm import NvidiaLLMService
+from pipecat.services.nvidia.sagemaker.stt import NvidiaSageMakerSTTService
+from pipecat.services.nvidia.sagemaker.tts import NvidiaSageMakerTTSService
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
 from pipecat.transports.websocket.fastapi import FastAPIWebsocketParams
-from pipecat.turns.user_turn_strategies import ExternalUserTurnStrategies
 
 load_dotenv(override=True)
-
 
 # We use lambdas to defer transport parameter creation until the transport
 # type is selected at runtime.
@@ -53,32 +53,28 @@ transport_params = {
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
-    stt = DeepgramSTTService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        settings=DeepgramSTTService.Settings(
-            vad_events=True,
-            utterance_end_ms="1000",
-        ),
+    stt = NvidiaSageMakerSTTService(
+        endpoint_name=os.environ["SAGEMAKER_ASR_ENDPOINT_NAME"],
+        region=os.getenv("AWS_REGION", "us-west-2"),
     )
 
-    tts = DeepgramTTSService(
-        api_key=os.getenv("DEEPGRAM_API_KEY"),
-        settings=DeepgramTTSService.Settings(
-            voice="aura-2-andromeda-en",
-        ),
-    )
-
-    llm = OpenAILLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
-        settings=OpenAILLMService.Settings(
+    llm = NvidiaLLMService(
+        api_key=os.environ["NVIDIA_API_KEY"],
+        settings=NvidiaLLMService.Settings(
+            model="meta/llama-3.3-70b-instruct",
             system_instruction="You are a helpful assistant in a voice conversation. Your responses will be spoken aloud, so avoid emojis, bullet points, or other formatting that can't be spoken. Respond to what the user said in a creative, helpful, and brief way.",
         ),
+    )
+
+    tts = NvidiaSageMakerTTSService(
+        endpoint_name=os.environ["SAGEMAKER_MAGPIE_ENDPOINT_NAME"],
+        region=os.getenv("AWS_REGION", "us-west-2"),
     )
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
         context,
-        user_params=LLMUserAggregatorParams(user_turn_strategies=ExternalUserTurnStrategies()),
+        user_params=LLMUserAggregatorParams(vad_analyzer=SileroVADAnalyzer()),
     )
 
     pipeline = Pipeline(

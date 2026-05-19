@@ -7,7 +7,7 @@
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -41,7 +41,7 @@ EVAL_WEATHER_AND_RESTAURANT = EvalConfig(
 
 EVAL_ONLINE_SEARCH = EvalConfig(
     prompt="What's the current date in UTC?",
-    eval=f"Current date in UTC is {datetime.now(timezone.utc).strftime('%A, %B %d, %Y')}.",
+    eval=f"Current date in UTC is {datetime.now(UTC).strftime('%A, %B %d, %Y')}.",
 )
 
 EVAL_SWITCH_LANGUAGE = EvalConfig(
@@ -108,6 +108,7 @@ TESTS_VOICE = [
     ("voice/voice-elevenlabs.py", EVAL_SIMPLE_MATH),
     ("voice/voice-elevenlabs-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-xai.py", EVAL_SIMPLE_MATH),
+    ("voice/voice-xai-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-azure.py", EVAL_SIMPLE_MATH),
     ("voice/voice-azure-http.py", EVAL_SIMPLE_MATH),
     ("voice/voice-openai.py", EVAL_SIMPLE_MATH),
@@ -222,12 +223,11 @@ TESTS_REALTIME = [
     # ("realtime/realtime-azure.py", EVAL_WEATHER),
     ("realtime/realtime-openai-text.py", EVAL_WEATHER),
     ("realtime/realtime-openai-live-video.py", EVAL_VISION_CAMERA),
-    ("realtime/realtime-gemini-live.py", EVAL_SIMPLE_MATH),
+    ("realtime/realtime-gemini-live.py", EVAL_WEATHER),
     ("realtime/realtime-gemini-live-local-vad.py", EVAL_SIMPLE_MATH),
-    ("realtime/realtime-gemini-live-function-calling.py", EVAL_WEATHER),
     ("realtime/realtime-gemini-live-video.py", EVAL_VISION_CAMERA),
     ("realtime/realtime-gemini-live-google-search.py", EVAL_ONLINE_SEARCH),
-    ("realtime/realtime-gemini-live-vertex-function-calling.py", EVAL_WEATHER),
+    ("realtime/realtime-gemini-live-vertex.py", EVAL_WEATHER),
     ("realtime/realtime-aws-nova-sonic.py", EVAL_SIMPLE_MATH),
     ("realtime/realtime-ultravox.py", EVAL_ORDER),
     ("realtime/realtime-grok.py", EVAL_WEATHER),
@@ -242,6 +242,7 @@ TESTS_VIDEO_AVATAR = [
 
 TESTS_TURN_MANAGEMENT = [
     ("turn-management/turn-management-filter-incomplete-turns.py", EVAL_COMPLETE_TURN),
+    ("turn-management/turn-management-filter-incomplete-turns-function-calling.py", EVAL_WEATHER),
 ]
 
 TESTS_THINKING = [

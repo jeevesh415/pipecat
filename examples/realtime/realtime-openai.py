@@ -136,7 +136,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     logger.info(f"Starting bot")
 
     llm = OpenAIRealtimeLLMService(
-        api_key=os.getenv("OPENAI_API_KEY"),
+        api_key=os.environ["OPENAI_API_KEY"],
         settings=OpenAIRealtimeLLMService.Settings(
             system_instruction="""You are a helpful and friendly AI.
 
@@ -230,6 +230,20 @@ Remember, your responses should be short. Just one or two sentences, usually. Re
         # context messages updated with your new desired system message.)
         # await task.queue_frames(
         #     [LLMUpdateSettingsFrame(settings=SessionProperties(tools=new_tools).model_dump())]
+        # )
+
+        # Reasoning effort can be changed at runtime too. Only
+        # reasoning-capable Realtime models (e.g. gpt-realtime-2) support this.
+        # await task.queue_frames(
+        #     [
+        #         LLMUpdateSettingsFrame(
+        #             delta=OpenAIRealtimeLLMService.Settings(
+        #                 session_properties=SessionProperties(
+        #                     reasoning=Reasoning(effort="xhigh"),
+        #                 ),
+        #             )
+        #         )
+        #     ]
         # )
 
     @transport.event_handler("on_client_disconnected")

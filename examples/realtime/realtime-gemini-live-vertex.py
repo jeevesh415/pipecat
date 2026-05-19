@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.adapters.schemas.function_schema import FunctionSchema
-from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
+from pipecat.adapters.schemas.tools_schema import ToolsSchema
 from pipecat.frames.frames import LLMRunFrame
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
@@ -21,7 +21,7 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import LLMContextAggregatorPair
 from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
-from pipecat.services.google.gemini_live.llm import GeminiLiveLLMService
+from pipecat.services.google.gemini_live.vertex.llm import GeminiLiveVertexLLMService
 from pipecat.services.llm_service import FunctionCallParams
 from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.transports.daily.transport import DailyParams
@@ -52,7 +52,6 @@ You are a helpful assistant who can answer questions and use tools.
 You have three tools available to you:
 1. get_current_weather: Use this tool to get the current weather in a specific location.
 2. get_restaurant_recommendation: Use this tool to get a restaurant recommendation in a specific location.
-3. google_search: Use this tool to search the web for information.
 """
 
 
@@ -104,19 +103,18 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         },
         required=["location"],
     )
-    search_tool = {"google_search": {}}
     # KNOWN ISSUE: If using GeminiVertexLiveLLMService, it appears
     # you cannot use the "google_search" tool alongside other tools.
     # See https://github.com/googleapis/python-genai/issues/941.
-    tools = ToolsSchema(
-        standard_tools=[weather_function, restaurant_function],
-        custom_tools={AdapterType.GEMINI: [search_tool]},
-    )
+    tools = ToolsSchema(standard_tools=[weather_function, restaurant_function])
 
-    llm = GeminiLiveLLMService(
-        api_key=os.getenv("GOOGLE_API_KEY"),
-        settings=GeminiLiveLLMService.Settings(
+    llm = GeminiLiveVertexLLMService(
+        credentials=os.getenv("GOOGLE_VERTEX_TEST_CREDENTIALS"),
+        project_id=os.environ["GOOGLE_CLOUD_PROJECT_ID"],
+        location=os.environ["GOOGLE_CLOUD_LOCATION"],
+        settings=GeminiLiveVertexLLMService.Settings(
             system_instruction=system_instruction,
+            voice="Puck",  # Aoede, Charon, Fenrir, Kore, Puck
         ),
         tools=tools,
     )
@@ -124,11 +122,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     llm.register_function("get_current_weather", fetch_weather_from_api)
     llm.register_function("get_restaurant_recommendation", fetch_restaurant_recommendation)
 
-    # You can provide the system instructions and tools in the context rather
-    # than as arguments to GeminiLiveLLMService, but note that doing so will
-    # trigger a (fast) reconnection when the GeminiLiveLLMService first
-    # receives the context (i.e. when we send the LLMRunFrame below).
-    context = LLMContext()
+    context = LLMContext([{"role": "developer", "content": "Say hello."}])
     # Server-side VAD is enabled by default; no local VAD is added.
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(context)
 
@@ -155,9 +149,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def on_client_connected(transport, client):
         logger.info(f"Client connected")
         # Kick off the conversation.
-        context.add_message(
-            {"role": "developer", "content": "Please introduce yourself to the user."}
-        )
         await task.queue_frames([LLMRunFrame()])
 
     @transport.event_handler("on_client_disconnected")

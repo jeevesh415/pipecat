@@ -8,7 +8,8 @@
 
 import asyncio
 import base64
-from typing import Any, Mapping, Optional
+from collections.abc import Mapping
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel, ValidationError
@@ -31,7 +32,12 @@ from pipecat.frames.frames import (
     SystemFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
-from pipecat.processors.frameworks.rtvi.frames import RTVIClientMessageFrame
+from pipecat.processors.frameworks.rtvi.frames import (
+    RTVIClientMessageFrame,
+    RTVIUICancelTaskFrame,
+    RTVIUIEventFrame,
+    RTVIUISnapshotFrame,
+)
 from pipecat.processors.frameworks.rtvi.observer import RTVIObserver, RTVIObserverParams
 from pipecat.services.llm_service import (
     FunctionCallParams,  # TODO(aleix): we shouldn't import `services` from `processors`
@@ -51,7 +57,7 @@ class RTVIProcessor(FrameProcessor):
     def __init__(
         self,
         *,
-        transport: Optional[BaseTransport] = None,
+        transport: BaseTransport | None = None,
         **kwargs,
     ):
         """Initialize the RTVI processor.
@@ -70,11 +76,12 @@ class RTVIProcessor(FrameProcessor):
         self._llm_skip_tts: bool = False  # Keep in sync with llm_service.py's configuration.
 
         # A task to process incoming transport messages.
-        self._message_task: Optional[asyncio.Task] = None
+        self._message_task: asyncio.Task | None = None
 
         self._register_event_handler("on_bot_started")
         self._register_event_handler("on_client_ready")
         self._register_event_handler("on_client_message")
+        self._register_event_handler("on_ui_message")
 
         self._input_transport = None
         self._transport = transport
@@ -84,7 +91,7 @@ class RTVIProcessor(FrameProcessor):
                 self._input_transport = input_transport
                 self._input_transport.enable_audio_in_stream_on_start(False)
 
-    def create_rtvi_observer(self, *, params: Optional[RTVIObserverParams] = None, **kwargs):
+    def create_rtvi_observer(self, *, params: RTVIObserverParams | None = None, **kwargs):
         """Creates a new RTVI Observer.
 
         Args:
@@ -101,7 +108,7 @@ class RTVIProcessor(FrameProcessor):
         self._client_ready = True
         await self._call_event_handler("on_client_ready")
 
-    async def set_bot_ready(self, about: Mapping[str, Any] = None):
+    async def set_bot_ready(self, about: Mapping[str, Any] | None = None):
         """Mark the bot as ready and send the bot-ready message.
 
         Args:
@@ -287,6 +294,41 @@ class RTVIProcessor(FrameProcessor):
                 case "client-message":
                     data = RTVI.RawClientMessageData.model_validate(message.data)
                     await self._handle_client_message(message.id, data)
+                case "ui-event":
+                    event_data = RTVI.UIEventData.model_validate(message.data or {})
+                    await self.push_frame(
+                        RTVIUIEventFrame(
+                            msg_id=message.id,
+                            event=event_data.event,
+                            payload=event_data.payload,
+                        )
+                    )
+                    await self._call_event_handler(
+                        "on_ui_message",
+                        RTVI.UIEventMessage(id=message.id, data=event_data),
+                    )
+                case "ui-snapshot":
+                    snapshot_data = RTVI.UISnapshotData.model_validate(message.data or {})
+                    await self.push_frame(
+                        RTVIUISnapshotFrame(msg_id=message.id, tree=snapshot_data.tree)
+                    )
+                    await self._call_event_handler(
+                        "on_ui_message",
+                        RTVI.UISnapshotMessage(id=message.id, data=snapshot_data),
+                    )
+                case "ui-cancel-task":
+                    cancel_data = RTVI.UICancelTaskData.model_validate(message.data or {})
+                    await self.push_frame(
+                        RTVIUICancelTaskFrame(
+                            msg_id=message.id,
+                            task_id=cancel_data.task_id,
+                            reason=cancel_data.reason,
+                        )
+                    )
+                    await self._call_event_handler(
+                        "on_ui_message",
+                        RTVI.UICancelTaskMessage(id=message.id, data=cancel_data),
+                    )
                 case "llm-function-call-result":
                     data = RTVI.LLMFunctionCallResultData.model_validate(message.data)
                     await self._handle_function_call_result(data)
@@ -403,7 +445,7 @@ class RTVIProcessor(FrameProcessor):
         )
         await self.push_frame(frame)
 
-    async def _send_bot_ready(self, about: Mapping[str, Any] = None):
+    async def _send_bot_ready(self, about: Mapping[str, Any] | None = None):
         """Send the bot-ready message to the client.
 
         Args:

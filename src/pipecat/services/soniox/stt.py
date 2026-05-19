@@ -8,8 +8,10 @@
 
 import json
 import time
+from collections import Counter
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any
 
 from loguru import logger
 from pydantic import BaseModel
@@ -24,7 +26,7 @@ from pipecat.frames.frames import (
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven
+from pipecat.services.settings import NOT_GIVEN, STTSettings, _NotGiven, assert_given
 from pipecat.services.stt_latency import SONIOX_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language, resolve_language
@@ -70,10 +72,10 @@ class SonioxContextObject(BaseModel):
     https://soniox.com/docs/stt/concepts/context
     """
 
-    general: Optional[List[SonioxContextGeneralItem]] = None
-    text: Optional[str] = None
-    terms: Optional[List[str]] = None
-    translation_terms: Optional[List[SonioxContextTranslationTerm]] = None
+    general: list[SonioxContextGeneralItem] | None = None
+    text: str | None = None
+    terms: list[str] | None = None
+    translation_terms: list[SonioxContextTranslationTerm] | None = None
 
 
 class SonioxInputParams(BaseModel):
@@ -99,17 +101,17 @@ class SonioxInputParams(BaseModel):
 
     model: str = "stt-rt-v4"
 
-    audio_format: Optional[str] = "pcm_s16le"
-    num_channels: Optional[int] = 1
+    audio_format: str | None = "pcm_s16le"
+    num_channels: int | None = 1
 
-    language_hints: Optional[List[Language]] = None
-    language_hints_strict: Optional[bool] = None
-    context: Optional[SonioxContextObject | str] = None
+    language_hints: list[Language] | None = None
+    language_hints_strict: bool | None = None
+    context: SonioxContextObject | str | None = None
 
-    enable_speaker_diarization: Optional[bool] = False
-    enable_language_identification: Optional[bool] = False
+    enable_speaker_diarization: bool | None = False
+    enable_language_identification: bool | None = False
 
-    client_reference_id: Optional[str] = None
+    client_reference_id: str | None = None
 
 
 def is_end_token(token: dict) -> bool:
@@ -190,14 +192,32 @@ def language_to_soniox_language(language: Language) -> str:
 
 
 def _prepare_language_hints(
-    language_hints: Optional[List[Language]],
-) -> Optional[List[str]]:
+    language_hints: list[Language] | None,
+) -> list[str] | None:
     if language_hints is None:
         return None
 
     prepared_languages = [language_to_soniox_language(lang) for lang in language_hints]
     # Remove duplicates (in case of language_hints with multiple regions).
     return list(set(prepared_languages))
+
+
+def _language_from_tokens(tokens: list[dict]) -> Language | None:
+    language_counts: Counter[Language] = Counter()
+
+    for token in tokens:
+        language = token.get("language")
+        if not language:
+            continue
+        try:
+            language_counts[Language(language)] += 1
+        except ValueError:
+            pass
+
+    if not language_counts:
+        return None
+
+    return language_counts.most_common(1)[0][0]
 
 
 @dataclass
@@ -215,7 +235,7 @@ class SonioxSTTSettings(STTSettings):
         client_reference_id: Client reference ID to use for transcription.
     """
 
-    language_hints: List[Language] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
+    language_hints: list[Language] | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     language_hints_strict: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     context: SonioxContextObject | str | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
     enable_speaker_diarization: bool | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
@@ -243,14 +263,14 @@ class SonioxSTTService(WebsocketSTTService):
         *,
         api_key: str,
         url: str = "wss://stt-rt.soniox.com/transcribe-websocket",
-        sample_rate: Optional[int] = None,
-        model: Optional[str] = None,
+        sample_rate: int | None = None,
+        model: str | None = None,
         audio_format: str = "pcm_s16le",
         num_channels: int = 1,
-        params: Optional[SonioxInputParams] = None,
+        params: SonioxInputParams | None = None,
         vad_force_turn_endpoint: bool = True,
-        settings: Optional[Settings] = None,
-        ttfs_p99_latency: Optional[float] = SONIOX_TTFS_P99,
+        settings: Settings | None = None,
+        ttfs_p99_latency: float | None = SONIOX_TTFS_P99,
         **kwargs,
     ):
         """Initialize the Soniox STT service.
@@ -337,7 +357,7 @@ class SonioxSTTService(WebsocketSTTService):
         self._num_channels = num_channels
 
         self._final_transcription_buffer = []
-        self._last_tokens_received: Optional[float] = None
+        self._last_tokens_received: float | None = None
 
         self._receive_task = None
 
@@ -401,7 +421,7 @@ class SonioxSTTService(WebsocketSTTService):
         await super().cancel(frame)
         await self._disconnect()
 
-    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame, None]:
+    async def run_stt(self, audio: bytes) -> AsyncGenerator[Frame | None, None]:
         """Send audio data to Soniox STT Service.
 
         Args:
@@ -411,13 +431,16 @@ class SonioxSTTService(WebsocketSTTService):
             Frame: None (transcription results come via WebSocket callbacks).
         """
         if self._websocket and self._websocket.state is State.OPEN:
-            await self._websocket.send(audio)
+            try:
+                await self._websocket.send(audio)
+            except Exception as e:
+                logger.warning(f"{self}: send failed: {e}")
 
         yield None
 
     @traced_stt
     async def _handle_transcription(
-        self, transcript: str, is_final: bool, language: Optional[Language] = None
+        self, transcript: str, is_final: bool, language: Language | None = None
     ):
         """Handle a transcription result with tracing."""
         pass
@@ -500,7 +523,7 @@ class SonioxSTTService(WebsocketSTTService):
                 "num_channels": self._num_channels,
                 "enable_endpoint_detection": enable_endpoint_detection,
                 "sample_rate": self.sample_rate,
-                "language_hints": _prepare_language_hints(s.language_hints),
+                "language_hints": _prepare_language_hints(assert_given(s.language_hints)),
                 "language_hints_strict": s.language_hints_strict,
                 "context": context,
                 "enable_speaker_diarization": s.enable_speaker_diarization,
@@ -553,6 +576,7 @@ class SonioxSTTService(WebsocketSTTService):
         async def send_endpoint_transcript():
             if self._final_transcription_buffer:
                 text = "".join(map(lambda token: token["text"], self._final_transcription_buffer))
+                language = _language_from_tokens(self._final_transcription_buffer)
                 # Soniox only pushes TranscriptionFrame when an end token is received,
                 # so every TranscriptionFrame is inherently finalized
                 await self.push_frame(
@@ -560,11 +584,12 @@ class SonioxSTTService(WebsocketSTTService):
                         text=text,
                         user_id=self._user_id,
                         timestamp=time_now_iso8601(),
+                        language=language,
                         result=self._final_transcription_buffer,
                         finalized=True,
                     )
                 )
-                await self._handle_transcription(text, is_final=True)
+                await self._handle_transcription(text, is_final=True, language=language)
                 await self.stop_processing_metrics()
                 self._final_transcription_buffer = []
 
@@ -644,4 +669,7 @@ class SonioxSTTService(WebsocketSTTService):
         Args:
             silence: Silent PCM audio bytes (unused, Soniox uses a protocol message).
         """
+        if self._websocket is None:
+            logger.warning(f"{self}: websocket unavailable, skipping keepalive")
+            return
         await self._websocket.send(KEEPALIVE_MESSAGE)
